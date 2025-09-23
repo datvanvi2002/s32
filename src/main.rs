@@ -1,20 +1,18 @@
+use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_hal::spi::{config::Config as SpiConfig, SpiDeviceDriver, SpiDriver, SpiDriverConfig};
-use esp_idf_svc::hal::delay::Delay;
-use esp_idf_svc::hal::gpio::PinDriver;
-
-///add for wifi
-use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::nvs::{EspNvsPartition, NvsDefault};
-use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, EspWifi};
-
 use esp_idf_hal::{gpio::*, peripherals::Peripherals};
 
-use esp_idf_sys as _;
-use mfrc522::comm::blocking::spi::SpiInterface;
-use mfrc522::Mfrc522;
-use std::{thread, time::Duration};
+use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::hal::delay::Delay;
+use esp_idf_svc::hal::gpio::PinDriver;
+use esp_idf_svc::http::client::{Configuration as HttpConfig, EspHttpConnection};
+use esp_idf_svc::nvs::{EspNvsPartition, NvsDefault};
+use esp_idf_svc::wifi::{AuthMethod, ClientConfiguration, Configuration, EspWifi};
+use serde_json::json;
 
-use esp_idf_hal::i2c::{I2cConfig, I2cDriver};
+use embedded_svc::http::client::Client;
+use embedded_svc::http::Method;
+use embedded_svc::io::{Read, Write};
 
 use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
@@ -22,9 +20,28 @@ use embedded_graphics::{
     prelude::*,
     text::Text,
 };
+use esp_idf_sys as _;
+use mfrc522::comm::blocking::spi::SpiInterface;
+use mfrc522::Mfrc522;
 use ssd1306::{
     mode::BufferedGraphicsMode, prelude::*, size::DisplaySize128x64, I2CDisplayInterface, Ssd1306,
 };
+use std::{thread, time::Duration};
+
+// ================== Firebase Realtime Database ==================
+const FIREBASE_DB_BASE: &str =
+    "https://esp32-payment-45c6a-default-rtdb.asia-southeast1.firebasedatabase.app/";
+// Nếu DB cần auth: đặt ID token hoặc database secret vào đây. Nếu public test: để None.
+static FIREBASE_AUTH_TOKEN: Option<&str> = None;
+
+fn bytes_to_hex(data: &[u8]) -> String {
+    let mut s = String::with_capacity(data.len() * 2);
+    for b in data {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{:02X}", b);
+    }
+    s
+}
 
 fn print_hex_bytes(data: &[u8]) {
     for b in data {
@@ -101,12 +118,12 @@ fn main() -> anyhow::Result<()> {
     .unwrap();
 
     let config = SpiConfig::new()
-        .baudrate(1_000_000u32.into()) // 1 MHz
+        .baudrate(1_000_000u32.into())
         .data_mode(embedded_hal::spi::MODE_0);
 
     let mut spi = SpiDeviceDriver::new(spi_driver, Some(cs), &config)?;
 
-    let delay = Delay::new(40000000); // Create a delay instance with a 240 MHz clock
+    let delay = Delay::new(40000000);
 
     thread::sleep(Duration::from_millis(1000));
     let spi_interface = SpiInterface::new(spi);
@@ -131,13 +148,12 @@ fn main() -> anyhow::Result<()> {
         log::info!("RFID module initialized successfully!");
     }
 
-    thread::sleep(Duration::from_millis(2000));
+    thread::sleep(Duration::from_millis(1000));
 
     /////////////////////////////////////////////////////////////////////////////////////
     ///////////// INIT OLED MODULE////////////////////////////////////////////////////
 
-    log::warn!("Hello, world-- ESP32-PAYMENT-RUST!");
-
+    log::info!("INIT: OLED I2C !");
     let sda = peripherals.pins.gpio8;
     let scl = peripherals.pins.gpio18;
 
@@ -153,7 +169,7 @@ fn main() -> anyhow::Result<()> {
     disp.clear(BinaryColor::Off).unwrap();
 
     let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
-    Text::new("hello", Point::new(0, 16), style)
+    Text::new("ESP32-Payment !", Point::new(0, 16), style)
         .draw(&mut disp)
         .unwrap();
 
@@ -166,11 +182,10 @@ fn main() -> anyhow::Result<()> {
     let nvs_partition = EspNvsPartition::<NvsDefault>::take()?;
     let mut wifi = EspWifi::new(modem, sysloop.clone(), Some(nvs_partition))?;
 
-    // Cấu hình STA
     wifi.set_configuration(&Configuration::Client(ClientConfiguration {
         ssid: SSID.try_into().unwrap(),
         password: PASSWORD.try_into().unwrap(),
-        auth_method: AuthMethod::WPA2Personal, // chỉnh theo mạng
+        auth_method: AuthMethod::WPA2Personal,
         ..Default::default()
     }))?;
 
@@ -178,9 +193,6 @@ fn main() -> anyhow::Result<()> {
     wifi.start()?;
     wifi.connect()?;
     log::info!("Đang kết nối tới Wi-Fi `{}` ...", SSID);
-
-    // Chờ kết nối & lấy IP (poll đơn giản)
-    let t0 = std::time::Instant::now();
 
     loop {
         //LED RUN STATUS
@@ -244,6 +256,7 @@ fn main() -> anyhow::Result<()> {
         /***********************************************************************************************************/
         if key_pressed == Some('A') {
             led.toggle().unwrap(); // Bật LED nếu phím 'A' được nhấn
+            log::info!("Test handle matrix keyboard");
         }
 
         /***********************************************************************************************************/
@@ -297,9 +310,9 @@ fn main() -> anyhow::Result<()> {
             _ => "Wi-Fi: - [N/A]".to_string(),
         };
 
-        let y1 = 10; // dòng 1: SSID
-        let y2 = 24; // dòng 2: phím
-        let y3 = 38; // dòng 3: UID
+        let y1 = 24; // dòng 1: SSID
+        let y2 = 38; // dòng 2: phím
+        let y3 = 52; // dòng 3: UID
 
         {
             use embedded_graphics::prelude::*;
@@ -337,9 +350,30 @@ fn main() -> anyhow::Result<()> {
             .draw(&mut disp)
             .unwrap();
 
+        disp.flush().unwrap();
+
         /***********************************************************************************************************/
         /********************************************** Gửi thông tin lên server ***********************************/
         /***********************************************************************************************************/
+
+        static mut TICK: u32 = 0;
+        unsafe {
+            TICK = TICK.wrapping_add(1);
+        }
+        if unsafe { TICK % 10 } == 0 {
+            // ~ mỗi 10 vòng (mỗi vòng ~1s theo blink)
+            match firebase_get_i64("gpio36") {
+                Ok(v) => log::info!("FB gpio36 = {}", v),
+                Err(e) => log::error!("FB get gpio36 error: {}", e),
+            }
+            match firebase_get_i64("gpio5") {
+                Ok(v) => {
+                    log::info!("FB gpio5 = {}", v);
+                    let _ = firebase_put_i64("gpio5", v + 1);
+                }
+                Err(e) => log::error!("FB get gpio5 error: {}", e),
+            }
+        }
 
         log::info!("From main.rs ESP32!");
         thread::sleep(Duration::from_millis(200));
@@ -364,3 +398,279 @@ fn read_sector<E, COMM: mfrc522::comm::Interface<Error = E>>(
         log::info!("{:02X?}", data);
     }
 }
+
+
+
+
+
+// ================== Firebase helpers ==================
+fn make_client() -> anyhow::Result<Client<EspHttpConnection>> {
+    let cfg = HttpConfig {
+        crt_bundle_attach: Some(esp_idf_sys::esp_crt_bundle_attach),
+        ..Default::default()
+    };
+    let conn = EspHttpConnection::new(&cfg)?;
+    Ok(Client::wrap(conn))
+}
+fn build_fb_url(path: &str) -> String {
+    let p = path.trim().trim_start_matches('/');
+    let mut url = format!("{}/{}.json", FIREBASE_DB_BASE.trim_end_matches('/'), p);
+    if let Some(tok) = FIREBASE_AUTH_TOKEN {
+        use core::fmt::Write as _;
+        let _ = write!(url, "?auth={}", tok);
+    }
+    url
+}
+
+fn http_get(url: &str) -> anyhow::Result<String> {
+    let mut client = make_client()?;
+
+    let mut req = client.request(Method::Get, url, &[])?;
+    let mut resp = req.submit()?;
+
+    let status = resp.status();
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let mut tmp = [0u8; 1024];
+
+    loop {
+        let n = resp.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+
+    let body = String::from_utf8_lossy(&buf).to_string();
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        anyhow::bail!("GET {} -> status {} body: {}", url, status, body)
+    }
+}
+
+fn http_put_json(url: &str, json_body: &str) -> anyhow::Result<()> {
+    let headers = &[("Content-Type", "application/json")];
+    let mut client = make_client()?;
+    let mut req = client.request(Method::Put, url, headers)?;
+    let mut sent = 0;
+    let data = json_body.as_bytes();
+    while sent < data.len() {
+        sent += req.write(&data[sent..])?;
+    }
+    req.flush()?;
+    let mut resp = req.submit()?;
+    let status = resp.status();
+
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        let mut buf: Vec<u8> = Vec::with_capacity(256);
+        let mut tmp = [0u8; 256];
+        loop {
+            let n = resp.read(&mut tmp)?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+        let body = String::from_utf8_lossy(&buf).to_string();
+        anyhow::bail!("PUT {} -> status {} body: {}", url, status, body)
+    }
+}
+
+fn http_patch_json(url: &str, json_body: &str) -> anyhow::Result<String> {
+    let headers = &[("Content-Type", "application/json")];
+    let mut client = make_client()?;
+    let mut req = client.request(Method::Patch, url, headers)?;
+    let data = json_body.as_bytes();
+    let mut sent = 0;
+    while sent < data.len() {
+        sent += req.write(&data[sent..])?;
+    }
+    req.flush()?;
+    let mut resp = req.submit()?;
+    let status = resp.status();
+    let mut buf: Vec<u8> = Vec::with_capacity(512);
+    let mut tmp = [0u8; 256];
+    loop {
+        let n = resp.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    let body = String::from_utf8_lossy(&buf).to_string();
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        anyhow::bail!("PATCH {} -> status {} body: {}", url, status, body)
+    }
+}
+
+fn firebase_get_i64(path: &str) -> anyhow::Result<i64> {
+    let url = build_fb_url(path);
+    let body = http_get(&url)?;
+    // giá trị có thể là "3" (string) hoặc 3 (number)
+    let v: serde_json::Value = serde_json::from_str(&body)?;
+    let n = match v {
+        serde_json::Value::Number(num) => num.as_i64().unwrap_or(0),
+        serde_json::Value::String(s) => s.parse::<i64>().unwrap_or(0),
+        _ => 0,
+    };
+    Ok(n)
+}
+
+fn firebase_put_i64(path: &str, value: i64) -> anyhow::Result<()> {
+    let url = build_fb_url(path);
+    let body = serde_json::to_string(&value.to_string())?; // lưu dạng chuỗi cho compatible
+    http_put_json(&url, &body)
+}
+
+// Put a string value to a node, e.g., "rfid/uid"
+fn firebase_put_str(path: &str, s: &str) -> anyhow::Result<()> {
+    let url = build_fb_url(path);
+    let body = serde_json::to_string(&s)?;
+    http_put_json(&url, &body)
+}
+
+fn http_post_json(url: &str, json_body: &str) -> anyhow::Result<String> {
+    let headers = &[("Content-Type", "application/json")];
+
+    let mut client = make_client()?;
+    let mut req = client.request(Method::Post, url, headers)?;
+
+    // Write all bytes
+    let data = json_body.as_bytes();
+    let mut sent = 0;
+    while sent < data.len() {
+        sent += req.write(&data[sent..])?;
+    }
+
+    req.flush()?;
+    let mut resp = req.submit()?;
+    let status = resp.status();
+
+    let mut buf: Vec<u8> = Vec::with_capacity(512);
+    let mut tmp = [0u8; 256];
+    loop {
+        let n = resp.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    let body = String::from_utf8_lossy(&buf).to_string();
+
+    if (200..300).contains(&status) {
+        Ok(body)
+    } else {
+        anyhow::bail!("POST {} -> status {} body: {}", url, status, body)
+    }
+}
+
+fn firebase_post_json<T: serde::Serialize>(path: &str, value: &T) -> anyhow::Result<String> {
+    let url = build_fb_url(path);
+    let body = serde_json::to_string(value)?;
+    http_post_json(&url, &body)
+}
+
+// Push RFID event and update current UID
+fn push_rfid(uid_hex: &str) {
+    // 1) Update current
+    if let Err(e) = firebase_put_str("rfid/uid", uid_hex) {
+        log::error!("PUT /rfid/uid error: {}", e);
+    } else {
+        log::info!("PUT /rfid/uid = {}", uid_hex);
+    }
+
+    // 2) Post event
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let evt = serde_json::json!({
+        "uid": uid_hex,
+        "ts": ts,
+        "note": "scan"
+    });
+    match firebase_post_json("events/rfid", &evt) {
+        Ok(ret) => log::info!("RFID event pushed: {}", ret),
+        Err(e) => log::error!("push RFID event error: {}", e),
+    }
+}
+
+fn firebase_patch_json<T: serde::Serialize>(path: &str, value: &T) -> anyhow::Result<String> {
+    let url = build_fb_url(path);
+    let body = serde_json::to_string(value)?;
+    http_patch_json(&url, &body)
+}
+
+fn set_rfid_uid(uid_hex: &str) -> anyhow::Result<()> {
+    let url = build_fb_url("rfid");
+    let body = serde_json::to_string(&json!({ "uid": uid_hex }))?;
+    http_put_json(&url, &body)
+}
+
+fn push_rfid_event(uid_hex: &str, note: &str) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let evt = json!({ "uid": uid_hex, "ts": ts, "note": note });
+
+    match firebase_post_json("events/rfid", &evt) {
+        Ok(ret) => log::info!("RFID event pushed: {}", ret),
+        Err(e) => log::error!("push RFID event error: {}", e),
+    }
+}
+
+// Chỉ đẩy khi UID khác lần trước & không rỗng
+static mut LAST_UID_HEX: heapless::String<32> = heapless::String::new();
+static mut LAST_UID_TS_US: i64 = 0;
+fn now_us() -> i64 {
+    unsafe { esp_idf_sys::esp_timer_get_time() }
+}
+
+fn push_rfid_if_new(uid_hex: &str) {
+    if uid_hex.is_empty() {
+        return;
+    }
+    let t = now_us();
+    let mut should = false;
+    unsafe {
+        if uid_hex != LAST_UID_HEX || t - LAST_UID_TS_US > 500_000 {
+            LAST_UID_HEX.clear();
+            let _ = LAST_UID_HEX.push_str(uid_hex);
+            LAST_UID_TS_US = t;
+            should = true;
+        }
+    }
+    if !should {
+        return;
+    }
+
+    // 1) Update current UID
+    if let Err(e) = set_rfid_uid(uid_hex) {
+        log::error!("SET /rfid uid error: {}", e);
+    } else {
+        log::info!("SET /rfid uid = {}", uid_hex);
+    }
+
+    // 2) Append event
+    let ts = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()) as i64;
+    let evt = json!({
+        "uid": uid_hex,
+        "ts": ts,
+        "note": "scan"
+    });
+    if let Err(e) = firebase_post_json("events/rfid", &evt) {
+        log::error!("POST events/rfid error: {}", e);
+    }
+}
+
+
+
