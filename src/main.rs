@@ -77,19 +77,19 @@ fn main() -> anyhow::Result<()> {
     let mut key_pressed: Option<char> = None;
 
     let mut led = PinDriver::output(peripherals.pins.gpio2).unwrap(); // khởi tạo chân GPIO2 làm đầu ra
+    
+    let mut row_0 = PinDriver::output(peripherals.pins.gpio13).unwrap();
+    let mut row_1 = PinDriver::output(peripherals.pins.gpio14).unwrap();
+    let mut row_2 = PinDriver::output(peripherals.pins.gpio21).unwrap();
+    let mut row_3 = PinDriver::output(peripherals.pins.gpio47).unwrap();
 
-    let mut row_0 = PinDriver::output(peripherals.pins.gpio9).unwrap();
-    let mut row_1 = PinDriver::output(peripherals.pins.gpio10).unwrap();
-    let mut row_2 = PinDriver::output(peripherals.pins.gpio11).unwrap();
-    let mut row_3 = PinDriver::output(peripherals.pins.gpio12).unwrap();
-
-    let mut col_0 = PinDriver::input(peripherals.pins.gpio13.downgrade()).unwrap();
+    let mut col_0 = PinDriver::input(peripherals.pins.gpio9.downgrade()).unwrap();
     col_0.set_pull(Pull::Up).unwrap();
-    let mut col_1 = PinDriver::input(peripherals.pins.gpio14.downgrade()).unwrap();
+    let mut col_1 = PinDriver::input(peripherals.pins.gpio10.downgrade()).unwrap();
     col_1.set_pull(Pull::Up).unwrap();
-    let mut col_2 = PinDriver::input(peripherals.pins.gpio21.downgrade()).unwrap();
+    let mut col_2 = PinDriver::input(peripherals.pins.gpio11.downgrade()).unwrap();
     col_2.set_pull(Pull::Up).unwrap();
-    let mut col_3 = PinDriver::input(peripherals.pins.gpio47.downgrade()).unwrap();
+    let mut col_3 = PinDriver::input(peripherals.pins.gpio12.downgrade()).unwrap();
     col_3.set_pull(Pull::Up).unwrap();
 
     ////////////////INIT RFID MODULE/////////////////////
