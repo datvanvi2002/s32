@@ -28,6 +28,82 @@ use ssd1306::{
 };
 use std::{thread, time::Duration};
 
+// ======== MODEL MENU + UI ========
+#[derive(Clone)]
+struct MenuItem {
+    name: String,
+    price: i64, // VND
+}
+// ======== UI chọn món dùng A/B/* =========
+struct UiMenu {
+    cursor: usize,    // đang trỏ item nào
+    qty: Vec<u8>,     // số lượng cho từng món (0..9)
+    win_top: usize,   // item đầu trong "cửa sổ" 3 dòng
+    total: i64,       // tổng tiền
+    last_key_ms: u64, // debounce
+}
+
+impl UiMenu {
+    fn new(len: usize) -> Self {
+        Self {
+            cursor: 0,
+            qty: vec![0; len],
+            win_top: 0,
+            total: 0,
+            last_key_ms: 0,
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+enum Key {
+    A,
+    B,
+    Star,
+    None,
+}
+
+fn now_ms() -> u64 {
+    use core::time::Duration;
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::from_millis(0))
+        .as_millis() as u64
+}
+
+fn format_vnd(n: i64) -> String {
+    // 45000 -> "45,000đ"
+    let mut s = n.abs().to_string();
+    let mut out = String::new();
+    while s.len() > 3 {
+        let t = s.split_off(s.len() - 3);
+        if out.is_empty() {
+            out = t;
+        } else {
+            out = format!("{},{}", t, out);
+        }
+    }
+    if out.is_empty() {
+        out = s;
+    } else {
+        out = format!("{},{}", s, out);
+    }
+    if n < 0 {
+        out.insert(0, '-');
+    }
+    out.push('đ');
+    out
+}
+
+#[derive(Copy, Clone, Debug)]
+enum Key {
+    A,
+    B,
+    Star,
+    None,
+}
+
 // ================== Firebase Realtime Database ==================
 const FIREBASE_DB_BASE: &str =
     "https://esp32-payment-45c6a-default-rtdb.asia-southeast1.firebasedatabase.app/";
@@ -77,7 +153,7 @@ fn main() -> anyhow::Result<()> {
     let mut key_pressed: Option<char> = None;
 
     let mut led = PinDriver::output(peripherals.pins.gpio2).unwrap(); // khởi tạo chân GPIO2 làm đầu ra
-    
+
     let mut row_0 = PinDriver::output(peripherals.pins.gpio13).unwrap();
     let mut row_1 = PinDriver::output(peripherals.pins.gpio14).unwrap();
     let mut row_2 = PinDriver::output(peripherals.pins.gpio21).unwrap();
@@ -150,6 +226,15 @@ fn main() -> anyhow::Result<()> {
 
     thread::sleep(Duration::from_millis(1000));
 
+    // ===== MENU STATE =====
+
+    let mut menu_items: Vec<(String, i64)> = firebase_get_menu().unwrap_or_default();
+    let mut ui_menu = UiMenu::new(menu_items.len());
+    let mut last_menu_fetch = std::time::Instant::now()
+        .checked_sub(core::time::Duration::from_secs(3600))
+        .unwrap_or(std::time::Instant::now());
+
+    let mut menu_scroll_idx: usize = 0;
     /////////////////////////////////////////////////////////////////////////////////////
     ///////////// INIT OLED MODULE////////////////////////////////////////////////////
 
@@ -249,6 +334,12 @@ fn main() -> anyhow::Result<()> {
                 // key_pressed = None; // Không có phím nào được nhấn
                 log::info!("No key pressed in row {}", i);
             }
+            let key = match key_pressed {
+                Some('A') => Key::A,
+                Some('B') => Key::B,
+                Some('*') => Key::Star,
+                _ => Key::None,
+            };
         }
 
         /***********************************************************************************************************/
@@ -257,6 +348,33 @@ fn main() -> anyhow::Result<()> {
         if key_pressed == Some('A') {
             led.toggle().unwrap(); // Bật LED nếu phím 'A' được nhấn
             log::info!("Test handle matrix keyboard");
+        }
+        // Cập nhật UI chọn món
+        ui_menu_handle_key(&mut ui_menu, key, menu_items.len());
+        ui_menu_recompute_total(&mut ui_menu, &menu_items);
+        if last_menu_fetch.elapsed() > Duration::from_secs(30) || menu_items.is_empty() {
+            match firebase_get_menu() {
+                Ok(v) => {
+                    // resize qty để giữ số lượng cũ nếu còn
+                    let old_len = menu_items.len();
+                    menu_items = v;
+                    if menu_items.len() != old_len {
+                        let mut new_qty = vec![0u8; menu_items.len()];
+                        for i in 0..ui_menu.qty.len().min(new_qty.len()) {
+                            new_qty[i] = ui_menu.qty[i];
+                        }
+                        ui_menu.qty = new_qty;
+
+                        if ui_menu.cursor >= menu_items.len() {
+                            ui_menu.cursor = menu_items.len().saturating_sub(1);
+                            ui_menu.win_top = ui_menu.cursor.saturating_sub(2);
+                        }
+                    }
+                    last_menu_fetch = std::time::Instant::now();
+                    log::info!("Menu items fetched: {}", menu_items.len());
+                }
+                Err(e) => log::warn!("Could not fetch menu: {}", e),
+            }
         }
 
         /***********************************************************************************************************/
@@ -292,91 +410,108 @@ fn main() -> anyhow::Result<()> {
         /********************************************** hiển thị OLED **********************************************/
         /***********************************************************************************************************/
 
-        let key_text = match key_pressed {
-            Some(c) => format!("Key: {}", c),
-            None => "Key: -".to_string(),
-        };
-        //let ssid_text = format!("Wi-Fi: {}", SSID);
-
-        let ssid_text = match wifi.get_configuration() {
-            Ok(Configuration::Client(cfg)) => {
-                let ok = wifi.sta_netif().get_ip_info().is_ok(); // có IP => ok
-                format!(
-                    "Wi-Fi: {} [{}]",
-                    cfg.ssid.as_str(),
-                    if ok { "OK" } else { "N/A" }
-                )
-            }
-            _ => "Wi-Fi: - [N/A]".to_string(),
-        };
-
-        let y1 = 24; // dòng 1: SSID
-        let y2 = 38; // dòng 2: phím
-        let y3 = 52; // dòng 3: UID
-
-        {
-            use embedded_graphics::prelude::*;
-            use embedded_graphics::primitives::{PrimitiveStyle, Rectangle};
-
-            // mỗi dòng cao 12px
-            let h = 12u32;
-
-            // Clear line 1
-            Rectangle::new(Point::new(0, y1 - 10), Size::new(128, h))
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
-                .draw(&mut disp)
-                .unwrap();
-
-            // Clear line 2
-            Rectangle::new(Point::new(0, y2 - 10), Size::new(128, h))
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
-                .draw(&mut disp)
-                .unwrap();
-
-            // Clear line 3
-            Rectangle::new(Point::new(0, y3 - 10), Size::new(128, h))
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
-                .draw(&mut disp)
-                .unwrap();
-        }
-
-        Text::new(&ssid_text, Point::new(0, y1), style)
-            .draw(&mut disp)
-            .unwrap();
-        Text::new(&key_text, Point::new(0, y2), style)
-            .draw(&mut disp)
-            .unwrap();
-        Text::new(&uid_line_text, Point::new(0, y3), style)
-            .draw(&mut disp)
-            .unwrap();
-
+        ui_menu_render(&mut disp, &menu_items, &ui_menu);
         disp.flush().unwrap();
 
         /***********************************************************************************************************/
         /********************************************** Gửi thông tin lên server ***********************************/
         /***********************************************************************************************************/
 
-        static mut TICK: u32 = 0;
-        unsafe {
-            TICK = TICK.wrapping_add(1);
-        }
-        if unsafe { TICK % 10 } == 0 {
-            // ~ mỗi 10 vòng (mỗi vòng ~1s theo blink)
-            match firebase_get_i64("gpio36") {
-                Ok(v) => log::info!("FB gpio36 = {}", v),
-                Err(e) => log::error!("FB get gpio36 error: {}", e),
-            }
-            match firebase_get_i64("gpio5") {
-                Ok(v) => {
-                    log::info!("FB gpio5 = {}", v);
-                    let _ = firebase_put_i64("gpio5", v + 1);
-                }
-                Err(e) => log::error!("FB get gpio5 error: {}", e),
-            }
-        }
+        // static mut TICK: u32 = 0;
+        // unsafe {
+        //     TICK = TICK.wrapping_add(1);
+        // }
+        // if unsafe { TICK % 10 } == 0 {
+        //     // ~ mỗi 10 vòng (mỗi vòng ~1s theo blink)
+        //     match firebase_get_i64("gpio36") {
+        //         Ok(v) => log::info!("FB gpio36 = {}", v),
+        //         Err(e) => log::error!("FB get gpio36 error: {}", e),
+        //     }
+        //     match firebase_get_i64("gpio5") {
+        //         Ok(v) => {
+        //             log::info!("FB gpio5 = {}", v);
+        //             let _ = firebase_put_i64("gpio5", v + 1);
+        //         }
+        //         Err(e) => log::error!("FB get gpio5 error: {}", e),
+        //     }
+        // }
 
         log::info!("From main.rs ESP32!");
         thread::sleep(Duration::from_millis(200));
+
+        // ====================== HIỂN THỊ MENU ======================
+        // Cứ mỗi 30s (hoặc lần đầu trống) thì tải lại danh sách món
+        if last_menu_fetch.elapsed() > Duration::from_secs(30) || menu_items.is_empty() {
+            match firebase_get_menu() {
+                Ok(v) => {
+                    menu_items = v;
+                    last_menu_fetch = std::time::Instant::now();
+                    log::info!("Menu items fetched: {}", menu_items.len());
+                    menu_scroll_idx = 0; // reset scroll
+                }
+                Err(e) => {
+                    log::warn!("Could not fetch menu: {}", e);
+                }
+            }
+        }
+
+        // Vẽ vùng MENU ở nửa dưới màn hình (y từ ~40px)
+        // Clear vùng hiển thị menu (3 dòng, mỗi dòng ~12px)
+        let menu_y = 40i32;
+        let line_h = 12u32;
+        for i in 0..3 {
+            embedded_graphics::primitives::Rectangle::new(
+                Point::new(0, menu_y + (i as i32) * (line_h as i32) - 10),
+                Size::new(128, line_h),
+            )
+            .into_styled(embedded_graphics::primitives::PrimitiveStyle::with_fill(
+                BinaryColor::Off,
+            ))
+            .draw(&mut disp)
+            .ok();
+        }
+
+        // Header "MENU"
+        let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+        embedded_graphics::text::Text::new("MENU:", Point::new(0, menu_y - 2), style)
+            .draw(&mut disp)
+            .ok();
+
+        // In tối đa 3 món theo dạng "Tên ... 45k"
+        if !menu_items.is_empty() {
+            for i in 0..3 {
+                let idx = (menu_scroll_idx + i) % menu_items.len();
+                let (name, price) = &menu_items[idx];
+
+                // Rút gọn tên cho vừa 128px (FONT_6X10 ~6px/char => ~21 ký tự)
+                let mut name_short = name.clone();
+                if name_short.chars().count() > 16 {
+                    name_short = name_short.chars().take(16).collect::<String>() + "…";
+                }
+                let price_text = format!("{}d", price); // hoặc định dạng "45,000đ"
+                let line = format!("{:<17}{}", name_short, price_text);
+
+                embedded_graphics::text::Text::new(
+                    &line,
+                    Point::new(0, menu_y + 12 * (i as i32) + 10),
+                    style,
+                )
+                .draw(&mut disp)
+                .ok();
+            }
+
+            // Cuộn mỗi vài vòng lặp (~tuỳ tốc độ loop của bạn). Ví dụ:
+            static mut MENU_TICK: u32 = 0;
+            unsafe {
+                MENU_TICK = MENU_TICK.wrapping_add(1);
+                if MENU_TICK % 20 == 0 {
+                    // đổi 20 tuỳ ý để cuộn chậm/nhanh
+                    menu_scroll_idx = (menu_scroll_idx + 1) % menu_items.len();
+                }
+            }
+        }
+
+        disp.flush().ok();
     }
 }
 
@@ -398,10 +533,6 @@ fn read_sector<E, COMM: mfrc522::comm::Interface<Error = E>>(
         log::info!("{:02X?}", data);
     }
 }
-
-
-
-
 
 // ================== Firebase helpers ==================
 fn make_client() -> anyhow::Result<Client<EspHttpConnection>> {
@@ -672,5 +803,140 @@ fn push_rfid_if_new(uid_hex: &str) {
     }
 }
 
+/// Đọc danh sách món ăn từ /menu (Realtime Database)
+/// Trả về Vec<(tên, giá)>
+/// Đọc danh sách món ăn từ /menu (Realtime Database).
+/// Trả về Vec<(tên, giá)>
+fn firebase_get_menu() -> anyhow::Result<Vec<(String, i64)>> {
+    let url = build_fb_url("menu");
+    let body = http_get(&url)?;
+    let v: serde_json::Value = serde_json::from_str(&body)?;
 
+    let mut out: Vec<(String, i64)> = Vec::new();
+    if let serde_json::Value::Object(map) = v {
+        for (_key, item) in map {
+            if let serde_json::Value::Object(obj) = item {
+                let name = obj
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("(no name)")
+                    .to_string();
+                let price = match obj.get("price") {
+                    Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0),
+                    Some(serde_json::Value::String(s)) => s.parse::<i64>().unwrap_or(0),
+                    _ => 0,
+                };
+                let available = obj
+                    .get("available")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(true);
+                if available {
+                    out.push((name, price));
+                }
+            }
+        }
+    }
+    // Sắp xếp theo tên cho dễ nhìn
+    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    Ok(out)
+}
+fn ui_menu_handle_key(ui: &mut UiMenu, key: Key, items_len: usize) {
+    const DEBOUNCE_MS: u64 = 100;
+    let now = now_ms();
+    if now - ui.last_key_ms < DEBOUNCE_MS {
+        return;
+    }
+    ui.last_key_ms = now;
 
+    match key {
+        Key::A => {
+            if items_len == 0 {
+                return;
+            }
+            ui.cursor = if ui.cursor == 0 {
+                items_len - 1
+            } else {
+                ui.cursor - 1
+            };
+            if ui.cursor < ui.win_top {
+                ui.win_top = ui.cursor;
+            }
+        }
+        Key::B => {
+            if items_len == 0 {
+                return;
+            }
+            ui.cursor = (ui.cursor + 1) % items_len;
+            if ui.cursor >= ui.win_top + 3 {
+                ui.win_top = ui.cursor + 1 - 3;
+            }
+        }
+        Key::Star => {
+            if items_len == 0 {
+                return;
+            }
+            let q = &mut ui.qty[ui.cursor];
+            *q = (*q + 1) % 10; // 0..9
+        }
+        Key::None => {}
+    }
+}
+
+fn ui_menu_recompute_total(ui: &mut UiMenu, items: &[(String, i64)]) {
+    let mut t = 0i64;
+    for (i, (_, price)) in items.iter().enumerate() {
+        t += *price * ui.qty[i] as i64;
+    }
+    ui.total = t;
+}
+
+fn ui_menu_render<D: DrawTarget<Color = BinaryColor>>(
+    disp: &mut D,
+    items: &[(String, i64)],
+    ui: &UiMenu,
+) {
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+
+    // Xoá vùng dưới (tuỳ chiều cao OLED của bạn; ở đây xoá từ y=36 trở xuống)
+    Rectangle::new(Point::new(0, 36), Size::new(128, 28))
+        .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+        .draw(disp)
+        .ok();
+
+    Text::new("MENU:", Point::new(0, 38), style).draw(disp).ok();
+
+    if items.is_empty() {
+        Text::new("(Khong co mon)", Point::new(0, 50), style)
+            .draw(disp)
+            .ok();
+    } else {
+        for row in 0..3usize {
+            let i = ui.win_top + row;
+            if i >= items.len() {
+                break;
+            }
+            let (name, price) = &items[i];
+            let cursor = if i == ui.cursor { ">" } else { " " };
+
+            let mut short = name.clone();
+            if short.chars().count() > 14 {
+                short = short.chars().take(14).collect::<String>() + "…";
+            }
+            let q = ui.qty[i];
+            let qch = if q == 0 { '-' } else { (b'0' + q) as char };
+            let line = format!(
+                "{c} [{q}] {name:<15}{price}",
+                c = cursor,
+                q = qch,
+                name = short,
+                price = format_vnd(*price)
+            );
+            Text::new(&line, Point::new(0, 50 + (row as i32) * 12), style)
+                .draw(disp)
+                .ok();
+        }
+    }
+
+    let status = format!("A↑ B↓ *=SL | Total {}", format_vnd(ui.total));
+    Text::new(&status, Point::new(0, 62), style).draw(disp).ok();
+}

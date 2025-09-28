@@ -1,0 +1,34 @@
+{
+  "menu": {
+    "burger_beef": {
+      "name": "Burger Bò",
+      "price": 45000,
+      "currency": "VND",
+      "available": true,
+      "category": "burger",
+      "sku": "BRG-BEEF",
+      "img": "https://.../burger.jpg",
+      "updatedAt": 1738000000000
+    },
+    "fried_chicken": {
+      "name": "Gà Rán 1 Miếng",
+      "price": 39000,
+      "currency": "VND",
+      "available": true,
+      "category": "chicken",
+      "sku": "CHK-1",
+      "img": "https://.../chicken.jpg",
+      "updatedAt": 1738000000000
+    },
+    "milk_tea_m": {
+      "name": "Trà Sữa (M)",
+      "price": 32000,
+      "currency": "VND",
+      "available": true,
+      "category": "drink",
+      "sku": "DRK-MT-M",
+      "img": "https://.../milktea.jpg",
+      "updatedAt": 1738000000000
+    }
+  }
+}
