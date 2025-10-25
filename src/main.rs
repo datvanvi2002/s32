@@ -18,8 +18,10 @@ use embedded_graphics::{
     mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::BinaryColor,
     prelude::*,
+    primitives::{PrimitiveStyle, Rectangle},
     text::Text,
 };
+
 use esp_idf_sys as _;
 use mfrc522::comm::blocking::spi::SpiInterface;
 use mfrc522::Mfrc522;
@@ -53,14 +55,6 @@ impl UiMenu {
             last_key_ms: 0,
         }
     }
-}
-
-#[derive(Copy, Clone)]
-enum Key {
-    A,
-    B,
-    Star,
-    None,
 }
 
 fn now_ms() -> u64 {
@@ -281,11 +275,11 @@ fn main() -> anyhow::Result<()> {
 
     loop {
         //LED RUN STATUS
-        log::info!("Blinking LED 2...");
+        //log::info!("Blinking LED 2...");
         led.set_high().unwrap(); // bật đèn LED
-        thread::sleep(Duration::from_millis(1000)); // đợi 1 gi ây
+        thread::sleep(Duration::from_millis(5)); // đợi 1 gi ây
         led.set_low().unwrap(); // tắt đèn LED
-        thread::sleep(Duration::from_millis(1000));
+        thread::sleep(Duration::from_millis(5));
 
         /***********************************************************************************************************/
         /********************************************** ĐỌC BÀN PHÍM MA TRẬN ***************************************/
@@ -334,12 +328,12 @@ fn main() -> anyhow::Result<()> {
                 // key_pressed = None; // Không có phím nào được nhấn
                 log::info!("No key pressed in row {}", i);
             }
-            let key = match key_pressed {
-                Some('A') => Key::A,
-                Some('B') => Key::B,
-                Some('*') => Key::Star,
-                _ => Key::None,
-            };
+            // let key = match key_pressed {
+            //     Some('A') => Key::A,
+            //     Some('B') => Key::B,
+            //     Some('*') => Key::Star,
+            //     _ => Key::None,
+            // };
         }
 
         /***********************************************************************************************************/
@@ -349,6 +343,12 @@ fn main() -> anyhow::Result<()> {
             led.toggle().unwrap(); // Bật LED nếu phím 'A' được nhấn
             log::info!("Test handle matrix keyboard");
         }
+        let key = match key_pressed {
+            Some('A') => Key::A,
+            Some('B') => Key::B,
+            Some('*') => Key::Star,
+            _ => Key::None,
+        };
         // Cập nhật UI chọn món
         ui_menu_handle_key(&mut ui_menu, key, menu_items.len());
         ui_menu_recompute_total(&mut ui_menu, &menu_items);
@@ -436,8 +436,8 @@ fn main() -> anyhow::Result<()> {
         //     }
         // }
 
-        log::info!("From main.rs ESP32!");
-        thread::sleep(Duration::from_millis(200));
+        //log::info!("From main.rs ESP32!");
+        thread::sleep(Duration::from_millis(20));
 
         // ====================== HIỂN THỊ MENU ======================
         // Cứ mỗi 30s (hoặc lần đầu trống) thì tải lại danh sách món
