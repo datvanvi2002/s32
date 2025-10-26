@@ -399,11 +399,6 @@ fn main() -> anyhow::Result<()> {
                 rfid.stop_crypto1().unwrap();
             }
         }
-
-        /***********************************************************************************************************/
-        /********************************************** hiển thị OLED **********************************************/
-        /***********************************************************************************************************/
-
         let old_len = menu_items.len();
         if menu_items.len() != old_len {
             let mut new_qty = vec![0u8; menu_items.len()];
@@ -491,7 +486,6 @@ fn main() -> anyhow::Result<()> {
                                 }
                                 Err(e) => {
                                     log::error!("provideCredentials error: {:?}", e);
-                                    // Fallback: hiện màn hình thất bại để không bị đứng
                                     tx_status =
                                         TxStatus::new(false, 0, 0, Some("Error".to_string()));
                                     screen = Screen::Status;
@@ -554,6 +548,7 @@ fn make_client() -> anyhow::Result<Client<EspHttpConnection>> {
     let conn = EspHttpConnection::new(&cfg)?;
     Ok(Client::wrap(conn))
 }
+//for emulator version
 // fn build_fb_url(path: &str) -> String {
 //     let p = path.trim().trim_start_matches('/');
 //     let mut url = format!("{}/{}.json", FIREBASE_DB_BASE.trim_end_matches('/'), p);
@@ -797,22 +792,18 @@ fn cf_provide_credentials(session_id: &str, uid: &str, pin: &str) -> anyhow::Res
     // DÙNG URL production
     match http_post_json(CF_PROVIDE_URL, &payload.to_string()) {
         Ok(resp_txt) => {
-            // 2xx -> parse bình thường
             Ok(serde_json::from_str(&resp_txt)?)
         }
         Err(e) => {
             // Nếu server trả 4xx cùng JSON {success:false, reason,...} thì trích JSON từ thông báo lỗi
             let msg = format!("{}", e);
-            // tìm JSON sau "body: "
             let reason_resp = if let Some(idx) = msg.find("body: ") {
                 let body_txt = msg[idx + 6..].trim();
-                // body có thể có dấu ngoặc JSON hợp lệ
                 serde_json::from_str::<serde_json::Value>(body_txt).ok()
             } else {
                 None
             };
             if let Some(v) = reason_resp {
-                // map các field (nếu thiếu thì điền mặc định)
                 let success = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
                 let balance = v.get("balance").and_then(|x| x.as_i64());
                 let deducted = v.get("deducted").and_then(|x| x.as_i64());
@@ -827,7 +818,6 @@ fn cf_provide_credentials(session_id: &str, uid: &str, pin: &str) -> anyhow::Res
                     reason,
                 })
             } else {
-                // Không parse được -> vẫn trả về kết quả thất bại để UI hiện "thông báo lỗi"
                 Ok(CfProvideResp {
                     success: false,
                     balance: None,
@@ -1292,7 +1282,7 @@ impl CheckoutState {
     }
 }
 fn co_uid_str(co: &CheckoutState) -> Option<String> {
-    // nếu nhập tay đủ 8 số
+    // nếu nhập tay đủ 10 số
     if co.card_uid.is_none() && co.uid_len == 10 {
         return Some(
             co.uid_input[..10]
@@ -1357,7 +1347,7 @@ fn ui_checkout_handle_key(co: &mut CheckoutState, key: Key) {
     const UID_MAX: u8 = 10;
     const PIN_MAX: u8 = 6;
     //ở case nhập số
-    // ban đầu có thể nhập UID (8 số dec) rồi mới nhập PIN (6 số dec)
+    // ban đầu có thể nhập UID (10 số dec) rồi mới nhập PIN (6 số dec)
     // hoặc quẹt thẻ rồi mới nhập PIN
     match key {
         // C: xoá 1 số cuối nếu có
